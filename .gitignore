@@ -1,0 +1,20 @@
+# Secrets - never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.ppk
+
+# Dependencies and builds
+node_modules/
+dist/
+
+# Terraform
+.terraform/
+*.tfstate*
+terraform.tfvars
+
+# Misc
+.DS_Store
+*.log
+coverage/

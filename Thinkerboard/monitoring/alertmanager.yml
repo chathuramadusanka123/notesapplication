@@ -1,0 +1,16 @@
+# Alerts go to Slack. Create a Slack "Incoming Webhook" for your #alerts channel and
+# paste it below. Do not commit a real webhook URL to a public repo.
+route:
+  receiver: slack
+  group_by: [alertname]
+  group_wait: 30s
+  repeat_interval: 4h
+
+receivers:
+  - name: slack
+    slack_configs:
+      - api_url: "https://hooks.slack.com/services/REPLACE/ME/PLEASE"
+        channel: "#alerts"
+        send_resolved: true
+        title: '{{ .Status | toUpper }}: {{ .CommonLabels.alertname }}'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }} (runbook: {{ .Annotations.runbook }}){{ "\n" }}{{ end }}'

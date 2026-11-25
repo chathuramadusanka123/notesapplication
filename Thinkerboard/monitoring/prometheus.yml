@@ -1,0 +1,33 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files: ["/etc/prometheus/alerts.yml"]
+
+alerting:
+  alertmanagers:
+    - static_configs: [{ targets: ["alertmanager:9093"] }]
+
+scrape_configs:
+  # The app's own metrics: requests, latency, MongoDB health, rate limiting, Node.js runtime
+  - job_name: thinkboard
+    static_configs: [{ targets: ["app:5001"] }]
+
+  # Synthetic checks from outside the app, like a user would.
+  # After deploying to AWS, add http://<load-balancer-dns>/ and /ready here.
+  - job_name: blackbox
+    scrape_interval: 30s
+    metrics_path: /probe
+    params: { module: [http_2xx] }
+    static_configs:
+      - targets:
+          - http://app:5001/
+          - http://app:5001/ready
+          - http://app:5001/api/notes
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox:9115

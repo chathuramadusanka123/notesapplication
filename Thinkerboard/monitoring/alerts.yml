@@ -1,0 +1,107 @@
+# SLOs (30 days):
+#   Availability: 99.5% of API requests do not fail with 5xx.
+#     429 (rate limited) and 4xx are not failures: they are the system working as designed.
+#   Latency: 95% of GET /api/notes requests finish in under 300 ms.
+# Every alert links to a runbook in docs/runbooks/.
+groups:
+  - name: slo-recording
+    rules:
+      - record: api:requests:rate5m
+        expr: sum(rate(http_requests_total{route=~"/api/.*"}[5m]))
+      - record: api:errors:rate5m
+        expr: sum(rate(http_requests_total{route=~"/api/.*",status=~"5.."}[5m]))
+      - record: api:error_ratio:rate5m
+        expr: api:errors:rate5m / clamp_min(api:requests:rate5m, 1e-9)
+      - record: api:error_ratio:rate1h
+        expr: |
+          sum(rate(http_requests_total{route=~"/api/.*",status=~"5.."}[1h]))
+          / clamp_min(sum(rate(http_requests_total{route=~"/api/.*"}[1h])), 1e-9)
+      - record: api:list_latency_p95:rate5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{route="/api/notes/",method="GET"}[5m])))
+
+  - name: availability
+    rules:
+      - alert: SiteDown
+        expr: probe_success{instance=~".*/"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "ThinkBoard home page is not loading ({{ $labels.instance }})"
+          runbook: "docs/runbooks/site-down.md"
+
+      - alert: NotReady
+        expr: probe_success{instance=~".*/ready"} == 0
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "ThinkBoard /ready is failing - usually MongoDB is unreachable"
+          runbook: "docs/runbooks/mongodb-down.md"
+
+      - alert: AppScrapeFailing
+        expr: up{job="thinkboard"} == 0
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Prometheus cannot reach the app's /metrics ({{ $labels.instance }})"
+          runbook: "docs/runbooks/site-down.md"
+
+  - name: api-slo
+    rules:
+      # Burning the 0.5% error budget 14.4x too fast: a month's budget would be gone in about 2 days
+      - alert: ErrorBudgetFastBurn
+        expr: api:error_ratio:rate1h > (14.4 * 0.005) and api:error_ratio:rate5m > (14.4 * 0.005)
+        for: 2m
+        labels: { severity: critical }
+        annotations:
+          summary: "API 5xx rate is {{ $value | humanizePercentage }} - error budget burning fast"
+          runbook: "docs/runbooks/api-errors.md"
+
+      - alert: NotesListSlow
+        expr: api:list_latency_p95:rate5m > 0.3
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "p95 latency for GET /api/notes is {{ $value | humanizeDuration }} (target 300ms)"
+          runbook: "docs/runbooks/api-errors.md"
+
+  - name: dependencies
+    rules:
+      - alert: MongoDBDown
+        expr: mongodb_up == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "The app cannot reach MongoDB ({{ $labels.instance }})"
+          runbook: "docs/runbooks/mongodb-down.md"
+
+      - alert: RateLimiterUnavailable
+        expr: increase(rate_limiter_errors_total[5m]) > 5
+        labels: { severity: warning }
+        annotations:
+          summary: "Upstash rate limiter is failing - requests are let through without limits (fail open)"
+          runbook: "docs/runbooks/rate-limiting.md"
+
+      - alert: RateLimitSpike
+        expr: sum(increase(rate_limited_requests_total[5m])) > 100
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} requests rate-limited in 5 minutes - possible abuse or a limit set too low"
+          runbook: "docs/runbooks/rate-limiting.md"
+
+  - name: runtime
+    rules:
+      - alert: EventLoopLag
+        expr: nodejs_eventloop_lag_p99_seconds > 0.2
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Node.js event loop lag p99 is {{ $value | humanizeDuration }} - the app is overloaded or blocked"
+          runbook: "docs/runbooks/api-errors.md"
+
+      - alert: HighMemory
+        expr: process_resident_memory_bytes > 400e6
+        for: 10m
+        labels: { severity: warning }
+        annotations:
+          summary: "App memory is {{ $value | humanize1024 }}B - possible leak"
+          runbook: "docs/runbooks/api-errors.md"

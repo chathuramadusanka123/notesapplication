@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: Thinkerboard
+
+env:
+  IMAGE: ${{ vars.DOCKERHUB_USER }}/thinkboard
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    services:
+      mongo:
+        image: mongo:7
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand(\"ping\").ok'"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: Thinkerboard/backend/package-lock.json
+      - run: npm ci
+        working-directory: Thinkerboard/backend
+      - run: npm test
+        working-directory: Thinkerboard/backend
+        env:
+          MONGO_TEST_URI: mongodb://localhost:27017
+
+  frontend-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: Thinkerboard/frontend/package-lock.json
+      - run: npm ci
+        working-directory: Thinkerboard/frontend
+      - run: npm run lint
+        working-directory: Thinkerboard/frontend
+      - run: npm run build
+        working-directory: Thinkerboard/frontend
+
+  image:
+    needs: [backend-tests, frontend-checks]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build --build-arg GIT_SHA=${{ github.sha }} -t thinkboard:ci .
+
+      - name: Start MongoDB and the app
+        run: |
+          docker network create tb
+          docker run -d --name mongo --network tb mongo:7
+          docker run -d --name app --network tb -p 5001:5001 \
+            -e MONGO_URI=mongodb://mongo:27017/thinkboard thinkboard:ci
+          for i in $(seq 1 30); do curl -fs localhost:5001/ready && break; sleep 2; done
+
+      - name: Smoke test (pages, health, full CRUD)
+        run: |
+          set -e
+          code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+          test "$(code localhost:5001/health)" = 200
+          test "$(code localhost:5001/ready)" = 200
+          test "$(code localhost:5001/)" = 200
+          test "$(code localhost:5001/create)" = 200          # React Router page
+          test "$(curl -s localhost:5001/version.txt)" = "${{ github.sha }}"
+
+          ID=$(curl -fs -X POST localhost:5001/api/notes -H 'Content-Type: application/json' \
+                 -d '{"title":"smoke","content":"test"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["_id"])')
+          test "$(code localhost:5001/api/notes/$ID)" = 200
+          test "$(code -X PUT localhost:5001/api/notes/$ID -H 'Content-Type: application/json' -d '{"title":"edited","content":"x"}')" = 200
+          test "$(code -X DELETE localhost:5001/api/notes/$ID)" = 200
+          test "$(code localhost:5001/api/notes/$ID)" = 404
+          test "$(code localhost:5001/api/notes/not-an-id)" = 404
+          test "$(code -X POST localhost:5001/api/notes -H 'Content-Type: application/json' -d '{}')" = 400
+          curl -fs localhost:5001/metrics | grep -q 'mongodb_up 1'
+          echo "All smoke tests passed"
+
+      - name: Graceful shutdown finishes cleanly
+        run: |
+          start=$(date +%s)
+          docker stop -t 30 app
+          echo "Stopped in $(( $(date +%s) - start ))s"
+          test "$(docker inspect -f '{{.State.ExitCode}}' app)" = 0
+          docker logs app 2>&1 | grep -q "Shutdown complete"
+
+      - name: App logs (on failure)
+        if: failure()
+        run: docker logs app
+
+      - name: Scan image for vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: thinkboard:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "0"   # report only for now; change to "1" to fail the build on findings
+
+      - name: Push to Docker Hub (main only, when configured)
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.DOCKERHUB_USER != ''
+        run: |
+          echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ vars.DOCKERHUB_USER }}" --password-stdin
+          docker tag thinkboard:ci $IMAGE:${{ github.sha }}
+          docker tag thinkboard:ci $IMAGE:latest
+          docker push $IMAGE:${{ github.sha }}
+          docker push $IMAGE:latest
