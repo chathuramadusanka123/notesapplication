@@ -2,7 +2,7 @@
 # Build from the Thinkerboard folder:  docker build -t thinkboard .
 
 # 1) Build the React frontend
-FROM node:20-alpine AS frontend
+FROM node:24-alpine AS frontend
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
 RUN npm ci
@@ -10,13 +10,13 @@ COPY frontend/ ./
 RUN npm run build
 
 # 2) Install backend production dependencies only
-FROM node:20-alpine AS backend-deps
+FROM node:24-alpine AS backend-deps
 WORKDIR /app/backend
 COPY backend/package*.json ./
 RUN npm ci --omit=dev
 
 # 3) Small runtime image
-FROM node:20-alpine
+FROM node:24-alpine
 ENV NODE_ENV=production \
     PORT=5001 \
     FRONTEND_DIST=/app/frontend/dist
